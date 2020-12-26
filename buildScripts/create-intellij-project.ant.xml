@@ -29,9 +29,9 @@ This buildfile is part of projectlombok.org. It creates the infrastructure neede
 		<echo>NOT IMPLEMENTED: The project should optimally be configured as a java1.6, using the rt.jar in lib/openjdk6_rt.jar as boot basis, to ensure lombok remains 1.6 compatible.</echo>
 		<echo>NOT IMPLEMENTED: Ability to run tests targeted at a specific jvm/javac/ecj/eclipse release; the relevant entrypoint test classes are lombok.RunBaseAndJavacTests and lombok.RunEclipseTests - you can run the eclipse tests even on intellij; an eclipse installation is not required.</echo>
 		<input>Press return to continue</input>
-		<ivy:intellijgen>
-			<conf name="build" sources="contrib" />
-			<conf name="test" sources="contrib" />
+		<ivy:intellijgen source="1.6">
+			<conf name="build" sources="sources" />
+			<conf name="test" sources="sources" />
 			<module name="lombok" depends="build, test">
 				<srcdir dir="src/core" />
 				<srcdir dir="src/core8" />
