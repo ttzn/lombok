@@ -22,7 +22,6 @@
 package lombok.javac.handlers;
 
 import com.sun.tools.javac.code.Flags;
-import com.sun.tools.javac.code.Symbol;
 import com.sun.tools.javac.code.Type;
 import com.sun.tools.javac.tree.JCTree;
 import com.sun.tools.javac.tree.JCTree.*;
@@ -40,10 +39,8 @@ import lombok.javac.JavacTreeMaker;
 import lombok.javac.handlers.JavacHandlerUtil.*;
 import org.mangosdk.spi.ProviderFor;
 
-import java.util.Arrays;
-
 import static lombok.core.handlers.HandlerUtil.handleFlagUsage;
-import static lombok.javac.Javac.*;
+import static lombok.javac.Javac.CTC_VOID;
 import static lombok.javac.handlers.JavacHandlerUtil.*;
 
 @ProviderFor(JavacAnnotationHandler.class)
@@ -53,17 +50,20 @@ public class HandleStandardException extends JavacAnnotationHandler<StandardExce
 	@Override
 	public void handle(AnnotationValues<StandardException> annotation, JCAnnotation ast, JavacNode annotationNode) {
 		handleFlagUsage(annotationNode, ConfigurationKeys.STANDARD_EXCEPTION_FLAG_USAGE, "@StandardException");
-
 		deleteAnnotationIfNeccessary(annotationNode, StandardException.class);
 		JavacNode typeNode = annotationNode.up();
 		if (!checkLegality(typeNode, annotationNode, NAME)) return;
 		List<JCAnnotation> onConstructor = unboxAndRemoveAnnotationParameter(ast, "onConstructor", "@NoArgsConstructor(onConstructor", annotationNode);
 		StandardException ann = annotation.getInstance();
-		ExceptionField messageField = new ExceptionField("message", String.class, typeNode.getSymbolTable().stringType);
-		ExceptionField causeField = new ExceptionField("cause", String.class, typeNode.getSymbolTable().throwableType);
-		List<ExceptionField> fields = List.of(messageField, causeField);
-		generateConstructor(typeNode, AccessLevel.PUBLIC, onConstructor, List.<ExceptionField>nil(), SkipIfConstructorExists.NO, annotationNode);
-		generateConstructor(typeNode, AccessLevel.PUBLIC, onConstructor, fields, SkipIfConstructorExists.NO, annotationNode);
+
+		SuperField messageField = new SuperField("message", typeNode.getSymbolTable().stringType);
+		SuperField causeField = new SuperField("cause", typeNode.getSymbolTable().throwableType);
+
+		SkipIfConstructorExists skip = SkipIfConstructorExists.YES;
+		generateConstructor(typeNode, AccessLevel.PUBLIC, onConstructor, List.<SuperField>nil(), skip, annotationNode);
+		generateConstructor(typeNode, AccessLevel.PUBLIC, onConstructor, List.of(messageField), skip, annotationNode);
+		generateConstructor(typeNode, AccessLevel.PUBLIC, onConstructor, List.of(causeField), skip, annotationNode);
+		generateConstructor(typeNode, AccessLevel.PUBLIC, onConstructor, List.of(messageField, causeField), skip, annotationNode);
 	}
 
 	public static List<JavacNode> findRequiredFields(JavacNode typeNode) {
@@ -127,14 +127,14 @@ public class HandleStandardException extends JavacAnnotationHandler<StandardExce
 	}
 
 	public void generateConstructor(JavacNode typeNode, AccessLevel level, List<JCAnnotation> onConstructor,
-									List<ExceptionField> fields, SkipIfConstructorExists skipIfConstructorExists, JavacNode source) {
+									List<SuperField> fields, SkipIfConstructorExists skipIfConstructorExists, JavacNode source) {
 		generate(typeNode, level, onConstructor, fields, skipIfConstructorExists, source);
 	}
 
-	private void generate(JavacNode typeNode, AccessLevel level, List<JCAnnotation> onConstructor, List<ExceptionField> fields,
+	private void generate(JavacNode typeNode, AccessLevel level, List<JCAnnotation> onConstructor, List<SuperField> fields,
 						  SkipIfConstructorExists skipIfConstructorExists, JavacNode source) {
 		ListBuffer<Type> argTypes = new ListBuffer<Type>();
-		for (ExceptionField field : fields) {
+		for (SuperField field : fields) {
 			Type mirror = field.type;
 			if (mirror == null) {
 				argTypes = null;
@@ -171,12 +171,12 @@ public class HandleStandardException extends JavacAnnotationHandler<StandardExce
 		return false;
 	}
 	
-	public static void addConstructorProperties(JCModifiers mods, JavacNode node, List<ExceptionField> fields) {
+	public static void addConstructorProperties(JCModifiers mods, JavacNode node, List<SuperField> fields) {
 		if (fields.isEmpty()) return;
 		JavacTreeMaker maker = node.getTreeMaker();
 		JCExpression constructorPropertiesType = chainDots(node, "java", "beans", "ConstructorProperties");
 		ListBuffer<JCExpression> fieldNames = new ListBuffer<JCExpression>();
-		for (ExceptionField field : fields) {
+		for (SuperField field : fields) {
 			Name fieldName = node.toName(field.name);
 			fieldNames.append(maker.Literal(fieldName.toString()));
 		}
@@ -186,7 +186,7 @@ public class HandleStandardException extends JavacAnnotationHandler<StandardExce
 	}
 	
 	@SuppressWarnings("deprecation") public static JCMethodDecl createConstructor(AccessLevel level, List<JCAnnotation> onConstructor,
-								  JavacNode typeNode, List<ExceptionField> fieldsToParam, JavacNode source) {
+																				  JavacNode typeNode, List<SuperField> fieldsToParam, JavacNode source) {
 		JavacTreeMaker maker = typeNode.getTreeMaker();
 		
 		boolean isEnum = (((JCClassDecl) typeNode.get()).mods.flags & Flags.ENUM) != 0;
@@ -202,20 +202,26 @@ public class HandleStandardException extends JavacAnnotationHandler<StandardExce
 				Boolean.FALSE.equals(typeNode.getAst().readConfiguration(ConfigurationKeys.ANY_CONSTRUCTOR_SUPPRESS_CONSTRUCTOR_PROPERTIES));
 		}
 		
-		ListBuffer<JCStatement> nullChecks = new ListBuffer<JCStatement>();
-		ListBuffer<JCStatement> assigns = new ListBuffer<JCStatement>();
+
 		ListBuffer<JCVariableDecl> params = new ListBuffer<JCVariableDecl>();
+		ListBuffer<JCExpression> superArgs = new ListBuffer<JCExpression>();
 		
-		for (ExceptionField fieldNode : fieldsToParam) {
+		for (SuperField fieldNode : fieldsToParam) {
 			Name fieldName = source.toName(fieldNode.name);
 			long flags = JavacHandlerUtil.addFinalIfNeeded(Flags.PARAMETER, typeNode.getContext());
 			JCExpression pType = maker.getUnderlyingTreeMaker().Ident(fieldNode.type.tsym);
 			JCVariableDecl param = maker.VarDef(maker.Modifiers(flags), fieldName, pType, null);
 			params.append(param);
-			JCFieldAccess thisX = maker.Select(maker.Ident(source.toName("this")), fieldName);
-			JCExpression assign = maker.Assign(thisX, maker.Ident(fieldName));
-			assigns.append(maker.Exec(assign));
+//			JCFieldAccess thisX = maker.Select(maker.Ident(source.toName("this")), fieldName);
+//			JCExpression assign = maker.Assign(thisX, maker.Ident(fieldName));
+			superArgs.append(maker.Ident(fieldName));
 		}
+
+		ListBuffer<JCStatement> statements = new ListBuffer<JCStatement>();
+		JCMethodInvocation callToSuper = maker.Apply(List.<JCExpression>nil(),
+				maker.Ident(typeNode.toName("super")),
+				superArgs.toList());
+		statements.add(maker.Exec(callToSuper));
 
 		JCModifiers mods = maker.Modifiers(toJavacModifier(level), List.<JCAnnotation>nil());
 		if (addConstructorProperties && !isLocalType(typeNode) && LombokOptionsFactory.getDelombokOptions(typeNode.getContext()).getFormatPreferences().generateConstructorProperties()) {
@@ -224,34 +230,9 @@ public class HandleStandardException extends JavacAnnotationHandler<StandardExce
 		if (onConstructor != null) mods.annotations = mods.annotations.appendList(copyAnnotations(onConstructor));
 		return recursiveSetGeneratedBy(maker.MethodDef(mods, typeNode.toName("<init>"),
 			null, List.<JCTypeParameter>nil(), params.toList(), List.<JCExpression>nil(),
-			maker.Block(0L, nullChecks.appendList(assigns).toList()), null), source.get(), typeNode.getContext());
+			maker.Block(0L, statements.toList()), null), source.get(), typeNode.getContext());
 	}
 
-	private static JCExpression getDefaultExpr(JavacTreeMaker maker, JCExpression type) {
-		if (type instanceof JCPrimitiveTypeTree) {
-			switch (((JCPrimitiveTypeTree) type).getPrimitiveTypeKind()) {
-			case BOOLEAN:
-				return maker.Literal(CTC_BOOLEAN, 0);
-			case CHAR:
-				return maker.Literal(CTC_CHAR, 0);
-			default:
-			case BYTE:
-			case SHORT:
-			case INT:
-				return maker.Literal(CTC_INT, 0);
-			case LONG:
-				return maker.Literal(CTC_LONG, 0L);
-			case FLOAT:
-				return maker.Literal(CTC_FLOAT, 0F);
-			case DOUBLE:
-				return maker.Literal(CTC_DOUBLE, 0D);
-			}
-		}
-		
-		return maker.Literal(CTC_BOT, null);
-		
-	}
-	
 	public static boolean isLocalType(JavacNode type) {
 		Kind kind = type.up().getKind();
 		if (kind == Kind.COMPILATION_UNIT) return false;
@@ -259,22 +240,13 @@ public class HandleStandardException extends JavacAnnotationHandler<StandardExce
 		return true;
 	}
 
-	private static class ExceptionField {
+	private static class SuperField {
 		private final String name;
-		private final Class<?> clazz;
 		private final Type type;
 
-		private ExceptionField(String name, Class<?> clazz, Type type) {
+		private SuperField(String name, Type type) {
 			this.name = name;
-			this.clazz = clazz;
 			this.type = type;
 		}
-	}
-
-	//@AllArgsConstructor
-	public class TestException extends RuntimeException {
-		@Getter
-		private String toto;
-
 	}
 }
