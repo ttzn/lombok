@@ -28,7 +28,9 @@ import com.sun.tools.javac.tree.JCTree.*;
 import com.sun.tools.javac.util.List;
 import com.sun.tools.javac.util.ListBuffer;
 import com.sun.tools.javac.util.Name;
-import lombok.*;
+import lombok.AccessLevel;
+import lombok.ConfigurationKeys;
+import lombok.StandardException;
 import lombok.core.AST.Kind;
 import lombok.core.AnnotationValues;
 import lombok.delombok.LombokOptionsFactory;
@@ -59,55 +61,13 @@ public class HandleStandardException extends JavacAnnotationHandler<StandardExce
 		SuperField messageField = new SuperField("message", typeNode.getSymbolTable().stringType);
 		SuperField causeField = new SuperField("cause", typeNode.getSymbolTable().throwableType);
 
-		SkipIfConstructorExists skip = SkipIfConstructorExists.YES;
+		boolean skip = true;
 		generateConstructor(typeNode, AccessLevel.PUBLIC, onConstructor, List.<SuperField>nil(), skip, annotationNode);
 		generateConstructor(typeNode, AccessLevel.PUBLIC, onConstructor, List.of(messageField), skip, annotationNode);
 		generateConstructor(typeNode, AccessLevel.PUBLIC, onConstructor, List.of(causeField), skip, annotationNode);
 		generateConstructor(typeNode, AccessLevel.PUBLIC, onConstructor, List.of(messageField, causeField), skip, annotationNode);
 	}
 
-	public static List<JavacNode> findRequiredFields(JavacNode typeNode) {
-		return findFields(typeNode, true);
-	}
-
-	public static List<JavacNode> findFields(JavacNode typeNode, boolean nullMarked) {
-		ListBuffer<JavacNode> fields = new ListBuffer<JavacNode>();
-		for (JavacNode child : typeNode.down()) {
-			if (child.getKind() != Kind.FIELD) continue;
-			JCVariableDecl fieldDecl = (JCVariableDecl) child.get();
-			//Skip fields that start with $
-			if (fieldDecl.name.toString().startsWith("$")) continue;
-			long fieldFlags = fieldDecl.mods.flags;
-			//Skip static fields.
-			if ((fieldFlags & Flags.STATIC) != 0) continue;
-			boolean isFinal = (fieldFlags & Flags.FINAL) != 0;
-			boolean isNonNull = nullMarked && hasNonNullAnnotations(child);
-			if ((isFinal || isNonNull) && fieldDecl.init == null) fields.append(child);
-		}
-		return fields.toList();
-	}
-
-	public static List<JavacNode> findAllFields(JavacNode typeNode) {
-		return findAllFields(typeNode, false);
-	}
-	
-	public static List<JavacNode> findAllFields(JavacNode typeNode, boolean evenFinalInitialized) {
-		ListBuffer<JavacNode> fields = new ListBuffer<JavacNode>();
-		for (JavacNode child : typeNode.down()) {
-			if (child.getKind() != Kind.FIELD) continue;
-			JCVariableDecl fieldDecl = (JCVariableDecl) child.get();
-			//Skip fields that start with $
-			if (fieldDecl.name.toString().startsWith("$")) continue;
-			long fieldFlags = fieldDecl.mods.flags;
-			//Skip static fields.
-			if ((fieldFlags & Flags.STATIC) != 0) continue;
-			//Skip initialized final fields
-			boolean isFinal = (fieldFlags & Flags.FINAL) != 0;
-			if (evenFinalInitialized || !isFinal || fieldDecl.init == null) fields.append(child);
-		}
-		return fields.toList();
-	}
-	
 	public static boolean checkLegality(JavacNode typeNode, JavacNode errorNode, String name) {
 		JCClassDecl typeDecl = null;
 		if (typeNode.get() instanceof JCClassDecl) typeDecl = (JCClassDecl) typeNode.get();
@@ -121,18 +81,14 @@ public class HandleStandardException extends JavacAnnotationHandler<StandardExce
 		
 		return true;
 	}
-	
-	public enum SkipIfConstructorExists {
-		YES, NO, I_AM_BUILDER;
-	}
 
 	public void generateConstructor(JavacNode typeNode, AccessLevel level, List<JCAnnotation> onConstructor,
-									List<SuperField> fields, SkipIfConstructorExists skipIfConstructorExists, JavacNode source) {
+									List<SuperField> fields, boolean skipIfConstructorExists, JavacNode source) {
 		generate(typeNode, level, onConstructor, fields, skipIfConstructorExists, source);
 	}
 
 	private void generate(JavacNode typeNode, AccessLevel level, List<JCAnnotation> onConstructor, List<SuperField> fields,
-						  SkipIfConstructorExists skipIfConstructorExists, JavacNode source) {
+						  boolean skipIfConstructorExists, JavacNode source) {
 		ListBuffer<Type> argTypes = new ListBuffer<Type>();
 		for (SuperField field : fields) {
 			Type mirror = field.type;
@@ -144,33 +100,45 @@ public class HandleStandardException extends JavacAnnotationHandler<StandardExce
 		}
 		List<Type> argTypes_ = argTypes == null ? null : argTypes.toList();
 
-		if (!(skipIfConstructorExists != SkipIfConstructorExists.NO && constructorExists(typeNode) != MemberExistsResult.NOT_EXISTS)) {
+		if (!(skipIfConstructorExists && constructorExists(typeNode, fields) != MemberExistsResult.NOT_EXISTS)) {
 			JCMethodDecl constr = createConstructor(level, onConstructor, typeNode, fields, source);
 			injectMethod(typeNode, constr, argTypes_, Javac.createVoidType(typeNode.getSymbolTable(), CTC_VOID));
 		}
 	}
 
-	private static boolean noArgsConstructorExists(JavacNode node) {
+	public static MemberExistsResult constructorExists(JavacNode node, List<SuperField> fields) {
 		node = upToTypeNode(node);
-		
+
 		if (node != null && node.get() instanceof JCClassDecl) {
-			for (JCTree def : ((JCClassDecl) node.get()).defs) {
+			outer: for (JCTree def : ((JCClassDecl)node.get()).defs) {
 				if (def instanceof JCMethodDecl) {
 					JCMethodDecl md = (JCMethodDecl) def;
-					if (md.name.contentEquals("<init>") && md.params.size() == 0) return true;
+					if (md.name.contentEquals("<init>")) {
+						if (isTolerate(node, md)) continue;
+
+						if (md.params == null) {
+							if (fields.size() != 0)
+								continue;
+						} else if (md.params.size() != fields.size()) {
+							continue;
+						} else {
+							for (int i = 0; i < fields.size(); i++) {
+								SuperField field = fields.get(i);
+								JCVariableDecl param = md.params.get(i);
+								if (!param.getType().type.equals(field.type))
+									continue outer;
+							}
+						}
+
+						return getGeneratedBy(def) == null ? MemberExistsResult.EXISTS_BY_USER : MemberExistsResult.EXISTS_BY_LOMBOK;
+					}
 				}
 			}
 		}
-		
-		for (JavacNode child : node.down()) {
-			if (annotationTypeMatches(NoArgsConstructor.class, child)) return true;
-			if (annotationTypeMatches(RequiredArgsConstructor.class, child) && findRequiredFields(node).isEmpty()) return true;
-			if (annotationTypeMatches(AllArgsConstructor.class, child) && findAllFields(node).isEmpty()) return true;
-		}
-		
-		return false;
+
+		return MemberExistsResult.NOT_EXISTS;
 	}
-	
+
 	public static void addConstructorProperties(JCModifiers mods, JavacNode node, List<SuperField> fields) {
 		if (fields.isEmpty()) return;
 		JavacTreeMaker maker = node.getTreeMaker();
@@ -212,8 +180,6 @@ public class HandleStandardException extends JavacAnnotationHandler<StandardExce
 			JCExpression pType = maker.getUnderlyingTreeMaker().Ident(fieldNode.type.tsym);
 			JCVariableDecl param = maker.VarDef(maker.Modifiers(flags), fieldName, pType, null);
 			params.append(param);
-//			JCFieldAccess thisX = maker.Select(maker.Ident(source.toName("this")), fieldName);
-//			JCExpression assign = maker.Assign(thisX, maker.Ident(fieldName));
 			superArgs.append(maker.Ident(fieldName));
 		}
 

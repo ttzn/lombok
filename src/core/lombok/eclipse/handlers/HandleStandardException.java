@@ -141,9 +141,7 @@ public class HandleStandardException extends EclipseAnnotationHandler<StandardEx
 							String fieldTypeName = Eclipse.toQualifiedName(superFields[i].type.getTypeName());
 							String argTypeName = Eclipse.toQualifiedName(def.arguments[i].type.getTypeName());
 
-							boolean isFqn = node.getImportListAsTypeResolver().typeMatches(node, fieldTypeName, argTypeName);
-							boolean reverseIsFqn = node.getImportListAsTypeResolver().typeMatches(node, argTypeName, fieldTypeName);
-							if (!isFqn && !reverseIsFqn)
+							if (!typeNamesMatch(node, fieldTypeName, argTypeName))
 								continue outer;
 						}
 					}
@@ -154,6 +152,12 @@ public class HandleStandardException extends EclipseAnnotationHandler<StandardEx
 		}
 
 		return MemberExistsResult.NOT_EXISTS;
+	}
+
+	private static boolean typeNamesMatch(EclipseNode node, String a, String b) {
+		boolean isFqn = node.getImportListAsTypeResolver().typeMatches(node, a, b);
+		boolean reverseIsFqn = node.getImportListAsTypeResolver().typeMatches(node, b, a);
+		return isFqn || reverseIsFqn;
 	}
 
 	private static final char[][] JAVA_BEANS_CONSTRUCTORPROPERTIES = new char[][] { "java".toCharArray(), "beans".toCharArray(), "ConstructorProperties".toCharArray() };
