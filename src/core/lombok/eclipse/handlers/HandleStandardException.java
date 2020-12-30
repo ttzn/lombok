@@ -51,48 +51,30 @@ public class HandleStandardException extends EclipseAnnotationHandler<StandardEx
 		handleFlagUsage(annotationNode, ConfigurationKeys.STANDARD_EXCEPTION_FLAG_USAGE, "@StandardException");
 
 		EclipseNode typeNode = annotationNode.up();
-		if (!checkLegality(typeNode, annotationNode, NAME)) return;
-		StandardException ann = annotation.getInstance();
-		SuperField messageField = new SuperField("message", new SingleTypeReference("String".toCharArray(), pos(typeNode.get())));
-		SuperField causeField = new SuperField("cause", new SingleTypeReference("Throwable".toCharArray(), pos(typeNode.get())));
-		List<Annotation> onConstructor = unboxAndRemoveAnnotationParameter(ast, "onConstructor", "@RequiredArgsConstructor(onConstructor", annotationNode);
+		if (!checkLegality(typeNode, annotationNode)) return;
+
+		SuperParameter message = new SuperParameter("message", new SingleTypeReference("String".toCharArray(), pos(typeNode.get())));
+		SuperParameter cause = new SuperParameter("cause", new SingleTypeReference("Throwable".toCharArray(), pos(typeNode.get())));
 
 		boolean skip = true;
 		generateConstructor(
-				typeNode, AccessLevel.PUBLIC, Collections.<SuperField>emptyList(), skip,
-				onConstructor, annotationNode);
+				typeNode, AccessLevel.PUBLIC, Collections.<SuperParameter>emptyList(), skip, annotationNode);
 		generateConstructor(
-				typeNode, AccessLevel.PUBLIC, Collections.singletonList(messageField), skip,
-				onConstructor, annotationNode);
+				typeNode, AccessLevel.PUBLIC, Collections.singletonList(message), skip, annotationNode);
 		generateConstructor(
-				typeNode, AccessLevel.PUBLIC, Collections.singletonList(causeField), skip,
-				onConstructor, annotationNode);
+				typeNode, AccessLevel.PUBLIC, Collections.singletonList(cause), skip, annotationNode);
 		generateConstructor(
-			typeNode, AccessLevel.PUBLIC, Arrays.asList(messageField, causeField), skip,
-			onConstructor, annotationNode);
+			typeNode, AccessLevel.PUBLIC, Arrays.asList(message, cause), skip, annotationNode);
 	}
 
-	private static List<EclipseNode> findFields(EclipseNode typeNode, boolean nullMarked) {
-		List<EclipseNode> fields = new ArrayList<EclipseNode>();
-		for (EclipseNode child : typeNode.down()) {
-			if (child.getKind() != Kind.FIELD) continue;
-			FieldDeclaration fieldDecl = (FieldDeclaration) child.get();
-			if (!filterField(fieldDecl)) continue;
-			boolean isFinal = (fieldDecl.modifiers & ClassFileConstants.AccFinal) != 0;
-			boolean isNonNull = nullMarked && hasNonNullAnnotations(child);
-			if ((isFinal || isNonNull) && fieldDecl.initialization == null) fields.add(child);
-		}
-		return fields;
-	}
-	
-	static boolean checkLegality(EclipseNode typeNode, EclipseNode errorNode, String name) {
+	static boolean checkLegality(EclipseNode typeNode, EclipseNode errorNode) {
 		TypeDeclaration typeDecl = null;
 		if (typeNode.get() instanceof TypeDeclaration) typeDecl = (TypeDeclaration) typeNode.get();
 		int modifiers = typeDecl == null ? 0 : typeDecl.modifiers;
 		boolean notAClass = (modifiers & (ClassFileConstants.AccInterface | ClassFileConstants.AccAnnotation)) != 0;
 		
 		if (typeDecl == null || notAClass) {
-			errorNode.addError(name + " is only supported on a class or an enum.");
+			errorNode.addError(HandleStandardException.NAME + " is only supported on a class or an enum.");
 			return false;
 		}
 		
@@ -100,58 +82,57 @@ public class HandleStandardException extends EclipseAnnotationHandler<StandardEx
 	}
 
 	public void generateConstructor(
-		EclipseNode typeNode, AccessLevel level, List<SuperField> fieldsToParam, boolean skipIfConstructorExists,
-		List<Annotation> onConstructor, EclipseNode sourceNode) {
+			EclipseNode typeNode, AccessLevel level, List<SuperParameter> parameters, boolean skipIfConstructorExists,
+			EclipseNode sourceNode) {
 		
-		generate(typeNode, level, fieldsToParam, skipIfConstructorExists, onConstructor, sourceNode);
+		generate(typeNode, level, parameters, skipIfConstructorExists, sourceNode);
 	}
 	
 	public void generate(
-			EclipseNode typeNode, AccessLevel level, List<SuperField> fieldsToParam, boolean skipIfConstructorExists,
-			List<Annotation> onConstructor, EclipseNode sourceNode) {
+			EclipseNode typeNode, AccessLevel level, List<SuperParameter> parameters, boolean skipIfConstructorExists,
+			EclipseNode sourceNode) {
 		if (!(skipIfConstructorExists
-				&& constructorExists(typeNode, fieldsToParam) != MemberExistsResult.NOT_EXISTS)) {
-			ConstructorDeclaration constr = createConstructor(level, typeNode, fieldsToParam, sourceNode, onConstructor);
+				&& constructorExists(typeNode, parameters) != MemberExistsResult.NOT_EXISTS)) {
+			ConstructorDeclaration constr = createConstructor(level, typeNode, parameters, sourceNode);
 			injectMethod(typeNode, constr);
 		}
 	}
 
 	/**
-	 * Checks if there is a (non-default) constructor. In case of multiple constructors (overloading), only
-	 * the first constructor decides if EXISTS_BY_USER or EXISTS_BY_LOMBOK is returned.
-	 *
-	 * @param node Any node that represents the Type (TypeDeclaration) to look in, or any child node thereof.
+	 * Checks if a constructor with the provided parameters exists under the type node.
 	 */
-	public static MemberExistsResult constructorExists(EclipseNode node, List<SuperField> fields) {
+	public static MemberExistsResult constructorExists(EclipseNode node, List<SuperParameter> parameters) {
 		node = upToTypeNode(node);
+		SuperParameter[] parameterArray = parameters.toArray(new SuperParameter[0]);
+
 		if (node != null && node.get() instanceof TypeDeclaration) {
 			TypeDeclaration typeDecl = (TypeDeclaration)node.get();
-			if (typeDecl.methods != null) outer: for (AbstractMethodDeclaration def : typeDecl.methods) {
+			if (typeDecl.methods != null) for (AbstractMethodDeclaration def : typeDecl.methods) {
 				if (def instanceof ConstructorDeclaration) {
-					if (isTolerate(node, def)) continue;
-
-					SuperField[] superFields = fields.toArray(new SuperField[0]);
-					if (def.arguments == null) {
-						if (superFields.length != 0)
-							continue;
-					} else if (def.arguments.length != superFields.length) {
-						continue;
-					} else {
-						for (int i = 0; i < superFields.length; i++) {
-							String fieldTypeName = Eclipse.toQualifiedName(superFields[i].type.getTypeName());
-							String argTypeName = Eclipse.toQualifiedName(def.arguments[i].type.getTypeName());
-
-							if (!typeNamesMatch(node, fieldTypeName, argTypeName))
-								continue outer;
-						}
-					}
-
+					if (!paramsMatch(node, def.arguments, parameterArray)) continue;
 					return getGeneratedBy(def) == null ? MemberExistsResult.EXISTS_BY_USER : MemberExistsResult.EXISTS_BY_LOMBOK;
 				}
 			}
 		}
 
 		return MemberExistsResult.NOT_EXISTS;
+	}
+
+	private static boolean paramsMatch(EclipseNode node, Argument[] arguments, SuperParameter[] parameters) {
+		if (arguments == null) {
+			return parameters.length == 0;
+		} else if (arguments.length != parameters.length) {
+			return false;
+		} else {
+			for (int i = 0; i < parameters.length; i++) {
+				String fieldTypeName = Eclipse.toQualifiedName(parameters[i].type.getTypeName());
+				String argTypeName = Eclipse.toQualifiedName(arguments[i].type.getTypeName());
+
+				if (!typeNamesMatch(node, fieldTypeName, argTypeName))
+					return false;
+			}
+		}
+		return true;
 	}
 
 	private static boolean typeNamesMatch(EclipseNode node, String a, String b) {
@@ -161,7 +142,7 @@ public class HandleStandardException extends EclipseAnnotationHandler<StandardEx
 	}
 
 	private static final char[][] JAVA_BEANS_CONSTRUCTORPROPERTIES = new char[][] { "java".toCharArray(), "beans".toCharArray(), "ConstructorProperties".toCharArray() };
-	public static Annotation[] createConstructorProperties(ASTNode source, Collection<SuperField> fields) {
+	public static Annotation[] createConstructorProperties(ASTNode source, Collection<SuperParameter> fields) {
 		if (fields.isEmpty()) return null;
 		
 		int pS = source.sourceStart, pE = source.sourceEnd;
@@ -179,7 +160,7 @@ public class HandleStandardException extends EclipseAnnotationHandler<StandardEx
 		fieldNames.expressions = new Expression[fields.size()];
 		
 		int ctr = 0;
-		for (SuperField field : fields) {
+		for (SuperParameter field : fields) {
 			char[] fieldName = field.name.toCharArray();
 			fieldNames.expressions[ctr] = new StringLiteral(fieldName, pS, pE, 0);
 			setGeneratedBy(fieldNames.expressions[ctr], source);
@@ -193,8 +174,7 @@ public class HandleStandardException extends EclipseAnnotationHandler<StandardEx
 	}
 
 	@SuppressWarnings("deprecation") public static ConstructorDeclaration createConstructor(
-		AccessLevel level, EclipseNode type, Collection<SuperField> fieldsToParam, EclipseNode sourceNode,
-		List<Annotation> onConstructor) {
+			AccessLevel level, EclipseNode type, Collection<SuperParameter> parameters, EclipseNode sourceNode) {
 
 		ASTNode source = sourceNode.get();
 		TypeDeclaration typeDeclaration = ((TypeDeclaration) type.get());
@@ -204,7 +184,7 @@ public class HandleStandardException extends EclipseAnnotationHandler<StandardEx
 		if (isEnum) level = AccessLevel.PRIVATE;
 
 		boolean addConstructorProperties;
-		if (fieldsToParam.isEmpty()) {
+		if (parameters.isEmpty()) {
 			addConstructorProperties = false;
 		} else {
 			Boolean v = type.getAst().readConfiguration(ConfigurationKeys.ANY_CONSTRUCTOR_ADD_CONSTRUCTOR_PROPERTIES);
@@ -226,7 +206,7 @@ public class HandleStandardException extends EclipseAnnotationHandler<StandardEx
 		List<Argument> params = new ArrayList<Argument>();
 		List<Expression> superArgs = new ArrayList<Expression>();
 
-		for (SuperField fieldNode : fieldsToParam) {
+		for (SuperParameter fieldNode : parameters) {
 			char[] fieldName = fieldNode.name.toCharArray();
 			long fieldPos = (((long) type.get().sourceStart) << 32) | type.get().sourceEnd;
 			Argument parameter = new Argument(fieldName, fieldPos, copyType(fieldNode.type, source), Modifier.FINAL);
@@ -244,11 +224,7 @@ public class HandleStandardException extends EclipseAnnotationHandler<StandardEx
 		
 		/* Generate annotations that must  be put on the generated method, and attach them. */ {
 			Annotation[] constructorProperties = null;
-			if (addConstructorProperties && !isLocalType(type)) constructorProperties = createConstructorProperties(source, fieldsToParam);
-			
-			constructor.annotations = copyAnnotations(source,
-				onConstructor.toArray(new Annotation[0]),
-				constructorProperties);
+			if (addConstructorProperties && !isLocalType(type)) constructorProperties = createConstructorProperties(source, parameters);
 		}
 		
 		constructor.traverse(new SetGeneratedByVisitor(source), typeDeclaration.scope);
@@ -262,11 +238,11 @@ public class HandleStandardException extends EclipseAnnotationHandler<StandardEx
 		return true;
 	}
 
-	private static class SuperField {
+	private static class SuperParameter {
 		private final String name;
 		private final TypeReference type;
 
-		private SuperField(String name, TypeReference type) {
+		private SuperParameter(String name, TypeReference type) {
 			this.name = name;
 			this.type = type;
 		}

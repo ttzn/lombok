@@ -54,43 +54,41 @@ public class HandleStandardException extends JavacAnnotationHandler<StandardExce
 		handleFlagUsage(annotationNode, ConfigurationKeys.STANDARD_EXCEPTION_FLAG_USAGE, "@StandardException");
 		deleteAnnotationIfNeccessary(annotationNode, StandardException.class);
 		JavacNode typeNode = annotationNode.up();
-		if (!checkLegality(typeNode, annotationNode, NAME)) return;
-		List<JCAnnotation> onConstructor = unboxAndRemoveAnnotationParameter(ast, "onConstructor", "@NoArgsConstructor(onConstructor", annotationNode);
-		StandardException ann = annotation.getInstance();
+		if (!checkLegality(typeNode, annotationNode)) return;
 
-		SuperField messageField = new SuperField("message", typeNode.getSymbolTable().stringType);
-		SuperField causeField = new SuperField("cause", typeNode.getSymbolTable().throwableType);
+		SuperParameter messageField = new SuperParameter("message", typeNode.getSymbolTable().stringType);
+		SuperParameter causeField = new SuperParameter("cause", typeNode.getSymbolTable().throwableType);
 
 		boolean skip = true;
-		generateConstructor(typeNode, AccessLevel.PUBLIC, onConstructor, List.<SuperField>nil(), skip, annotationNode);
-		generateConstructor(typeNode, AccessLevel.PUBLIC, onConstructor, List.of(messageField), skip, annotationNode);
-		generateConstructor(typeNode, AccessLevel.PUBLIC, onConstructor, List.of(causeField), skip, annotationNode);
-		generateConstructor(typeNode, AccessLevel.PUBLIC, onConstructor, List.of(messageField, causeField), skip, annotationNode);
+		generateConstructor(typeNode, AccessLevel.PUBLIC, List.<SuperParameter>nil(), skip, annotationNode);
+		generateConstructor(typeNode, AccessLevel.PUBLIC, List.of(messageField), skip, annotationNode);
+		generateConstructor(typeNode, AccessLevel.PUBLIC, List.of(causeField), skip, annotationNode);
+		generateConstructor(typeNode, AccessLevel.PUBLIC, List.of(messageField, causeField), skip, annotationNode);
 	}
 
-	public static boolean checkLegality(JavacNode typeNode, JavacNode errorNode, String name) {
+	public static boolean checkLegality(JavacNode typeNode, JavacNode errorNode) {
 		JCClassDecl typeDecl = null;
 		if (typeNode.get() instanceof JCClassDecl) typeDecl = (JCClassDecl) typeNode.get();
 		long modifiers = typeDecl == null ? 0 : typeDecl.mods.flags;
 		boolean notAClass = (modifiers & (Flags.INTERFACE | Flags.ANNOTATION)) != 0;
 		
 		if (typeDecl == null || notAClass) {
-			errorNode.addError(name + " is only supported on a class or an enum.");
+			errorNode.addError(NAME + " is only supported on a class or an enum.");
 			return false;
 		}
 		
 		return true;
 	}
 
-	public void generateConstructor(JavacNode typeNode, AccessLevel level, List<JCAnnotation> onConstructor,
-									List<SuperField> fields, boolean skipIfConstructorExists, JavacNode source) {
-		generate(typeNode, level, onConstructor, fields, skipIfConstructorExists, source);
+	public void generateConstructor(JavacNode typeNode, AccessLevel level, List<SuperParameter> fields,
+									boolean skipIfConstructorExists, JavacNode source) {
+		generate(typeNode, level, fields, skipIfConstructorExists, source);
 	}
 
-	private void generate(JavacNode typeNode, AccessLevel level, List<JCAnnotation> onConstructor, List<SuperField> fields,
-						  boolean skipIfConstructorExists, JavacNode source) {
+	private void generate(JavacNode typeNode, AccessLevel level, List<SuperParameter> fields, boolean skipIfConstructorExists,
+						  JavacNode source) {
 		ListBuffer<Type> argTypes = new ListBuffer<Type>();
-		for (SuperField field : fields) {
+		for (SuperParameter field : fields) {
 			Type mirror = field.type;
 			if (mirror == null) {
 				argTypes = null;
@@ -101,35 +99,20 @@ public class HandleStandardException extends JavacAnnotationHandler<StandardExce
 		List<Type> argTypes_ = argTypes == null ? null : argTypes.toList();
 
 		if (!(skipIfConstructorExists && constructorExists(typeNode, fields) != MemberExistsResult.NOT_EXISTS)) {
-			JCMethodDecl constr = createConstructor(level, onConstructor, typeNode, fields, source);
+			JCMethodDecl constr = createConstructor(level, typeNode, fields, source);
 			injectMethod(typeNode, constr, argTypes_, Javac.createVoidType(typeNode.getSymbolTable(), CTC_VOID));
 		}
 	}
 
-	public static MemberExistsResult constructorExists(JavacNode node, List<SuperField> fields) {
+	public static MemberExistsResult constructorExists(JavacNode node, List<SuperParameter> parameters) {
 		node = upToTypeNode(node);
 
 		if (node != null && node.get() instanceof JCClassDecl) {
-			outer: for (JCTree def : ((JCClassDecl)node.get()).defs) {
+			for (JCTree def : ((JCClassDecl) node.get()).defs) {
 				if (def instanceof JCMethodDecl) {
 					JCMethodDecl md = (JCMethodDecl) def;
 					if (md.name.contentEquals("<init>")) {
-						if (isTolerate(node, md)) continue;
-
-						if (md.params == null) {
-							if (fields.size() != 0)
-								continue;
-						} else if (md.params.size() != fields.size()) {
-							continue;
-						} else {
-							for (int i = 0; i < fields.size(); i++) {
-								SuperField field = fields.get(i);
-								JCVariableDecl param = md.params.get(i);
-								if (!param.getType().type.equals(field.type))
-									continue outer;
-							}
-						}
-
+						if (!paramsMatch(md.params, parameters)) continue;
 						return getGeneratedBy(def) == null ? MemberExistsResult.EXISTS_BY_USER : MemberExistsResult.EXISTS_BY_LOMBOK;
 					}
 				}
@@ -139,12 +122,29 @@ public class HandleStandardException extends JavacAnnotationHandler<StandardExce
 		return MemberExistsResult.NOT_EXISTS;
 	}
 
-	public static void addConstructorProperties(JCModifiers mods, JavacNode node, List<SuperField> fields) {
+	private static boolean paramsMatch(List<JCVariableDecl> params, List<SuperParameter> fields) {
+		if (params == null) {
+			return fields.size() == 0;
+		} else if (params.size() != fields.size()) {
+			return false;
+		} else {
+			for (int i = 0; i < fields.size(); i++) {
+				SuperParameter field = fields.get(i);
+				JCVariableDecl param = params.get(i);
+				if (!param.getType().type.equals(field.type))
+					return false;
+			}
+		}
+
+		return true;
+	}
+
+	public static void addConstructorProperties(JCModifiers mods, JavacNode node, List<SuperParameter> fields) {
 		if (fields.isEmpty()) return;
 		JavacTreeMaker maker = node.getTreeMaker();
 		JCExpression constructorPropertiesType = chainDots(node, "java", "beans", "ConstructorProperties");
 		ListBuffer<JCExpression> fieldNames = new ListBuffer<JCExpression>();
-		for (SuperField field : fields) {
+		for (SuperParameter field : fields) {
 			Name fieldName = node.toName(field.name);
 			fieldNames.append(maker.Literal(fieldName.toString()));
 		}
@@ -153,8 +153,8 @@ public class HandleStandardException extends JavacAnnotationHandler<StandardExce
 		mods.annotations = mods.annotations.append(annotation);
 	}
 	
-	@SuppressWarnings("deprecation") public static JCMethodDecl createConstructor(AccessLevel level, List<JCAnnotation> onConstructor,
-																				  JavacNode typeNode, List<SuperField> fieldsToParam, JavacNode source) {
+	@SuppressWarnings("deprecation") public static JCMethodDecl createConstructor(AccessLevel level, JavacNode typeNode,
+																				  List<SuperParameter> fieldsToParam, JavacNode source) {
 		JavacTreeMaker maker = typeNode.getTreeMaker();
 		
 		boolean isEnum = (((JCClassDecl) typeNode.get()).mods.flags & Flags.ENUM) != 0;
@@ -169,12 +169,11 @@ public class HandleStandardException extends JavacAnnotationHandler<StandardExce
 			addConstructorProperties = v != null ? v.booleanValue() :
 				Boolean.FALSE.equals(typeNode.getAst().readConfiguration(ConfigurationKeys.ANY_CONSTRUCTOR_SUPPRESS_CONSTRUCTOR_PROPERTIES));
 		}
-		
 
 		ListBuffer<JCVariableDecl> params = new ListBuffer<JCVariableDecl>();
 		ListBuffer<JCExpression> superArgs = new ListBuffer<JCExpression>();
 		
-		for (SuperField fieldNode : fieldsToParam) {
+		for (SuperParameter fieldNode : fieldsToParam) {
 			Name fieldName = source.toName(fieldNode.name);
 			long flags = JavacHandlerUtil.addFinalIfNeeded(Flags.PARAMETER, typeNode.getContext());
 			JCExpression pType = maker.getUnderlyingTreeMaker().Ident(fieldNode.type.tsym);
@@ -193,7 +192,6 @@ public class HandleStandardException extends JavacAnnotationHandler<StandardExce
 		if (addConstructorProperties && !isLocalType(typeNode) && LombokOptionsFactory.getDelombokOptions(typeNode.getContext()).getFormatPreferences().generateConstructorProperties()) {
 			addConstructorProperties(mods, typeNode, fieldsToParam);
 		}
-		if (onConstructor != null) mods.annotations = mods.annotations.appendList(copyAnnotations(onConstructor));
 		return recursiveSetGeneratedBy(maker.MethodDef(mods, typeNode.toName("<init>"),
 			null, List.<JCTypeParameter>nil(), params.toList(), List.<JCExpression>nil(),
 			maker.Block(0L, statements.toList()), null), source.get(), typeNode.getContext());
@@ -206,11 +204,11 @@ public class HandleStandardException extends JavacAnnotationHandler<StandardExce
 		return true;
 	}
 
-	private static class SuperField {
+	private static class SuperParameter {
 		private final String name;
 		private final Type type;
 
-		private SuperField(String name, Type type) {
+		private SuperParameter(String name, Type type) {
 			this.name = name;
 			this.type = type;
 		}
