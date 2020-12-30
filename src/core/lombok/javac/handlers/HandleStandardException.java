@@ -111,7 +111,7 @@ public class HandleStandardException extends JavacAnnotationHandler<StandardExce
 			for (JCTree def : ((JCClassDecl) node.get()).defs) {
 				if (def instanceof JCMethodDecl) {
 					JCMethodDecl md = (JCMethodDecl) def;
-					if (md.name.contentEquals("<init>")) {
+					if (md.name.contentEquals("<init>") && (md.mods.flags & Flags.GENERATEDCONSTR) == 0) {
 						if (!paramsMatch(md.params, parameters)) continue;
 						return getGeneratedBy(def) == null ? MemberExistsResult.EXISTS_BY_USER : MemberExistsResult.EXISTS_BY_LOMBOK;
 					}
